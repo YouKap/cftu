@@ -29,6 +29,7 @@ fi
 install_cf() {
     clear
     echo -e "${BLUE}正在安裝 Cloudflared 環境...${PLAIN}"
+    mkdir -p /etc/cloudflared
     apt-get update && apt-get install -y curl wget gnupg sudo systemd mawk nano
     mkdir -p --mode=0755 /usr/share/keyrings
     curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | sudo tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null
