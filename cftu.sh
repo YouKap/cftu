@@ -275,7 +275,12 @@ while true; do
     echo -e "${YELLOW} 6.${PLAIN} 🔄 更新本腳本"
     echo -e "${YELLOW} 0.${PLAIN} 退出腳本"
     echo -e "${BLUE}=================================================${PLAIN}"
-    read -p "請輸入數字選擇功能 [0-6]: " choice
+    
+    # 使用 -p 確保 read 阻塞，並增加一組判斷
+    read -rp "請輸入數字選擇功能 [0-6]: " choice
+
+    # 如果用戶直接按 Enter（輸入為空），則直接重新顯示選單，不報錯
+    [[ -z "$choice" ]] && continue
 
     case $choice in
         1) install_env_and_cf ;;
@@ -285,6 +290,9 @@ while true; do
         5) show_status ;;
         6) update_script ;;
         0) clear; exit 0 ;;
-        *) echo -e "${RED}無效的輸入，請重新選擇!${PLAIN}"; sleep 1 ;;
+        *) 
+            echo -e "${RED}無效的輸入 [$choice]，請重新選擇!${PLAIN}"
+            sleep 2 # 給用戶看清楚報錯的時間，防止瘋狂刷新
+            ;;
     esac
 done
