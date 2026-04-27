@@ -100,7 +100,6 @@ manage_tunnels() {
     while true; do
         clear
         echo -e "${BLUE}=== ⚙️ 管理現有通道 ===${PLAIN}"
-        # 掃描 yml 檔案
         TUNNELS=( $(ls -1 $CF_DIR/*.yml 2>/dev/null | xargs -n 1 basename | sed 's/\.yml//g') )
         
         if [ ${#TUNNELS[@]} -eq 0 ]; then
@@ -108,50 +107,50 @@ manage_tunnels() {
         fi
 
         for i in "${!TUNNELS[@]}"; do
-            echo -e " ${YELLOW}$((i+1)).${PLAIN} 通道: ${BLUE}${TUNNELS[$i]}${PLAIN}"
+            STATUS_CHECK=$(systemctl is-active ${TUNNELS[$i]}.service 2>/dev/null)
+            [[ "$STATUS_CHECK" == "active" ]] && S_TEXT="${GREEN}運行中${PLAIN}" || S_TEXT="${RED}已停止${PLAIN}"
+            echo -e " ${YELLOW}$((i+1)).${PLAIN} ${BLUE}${TUNNELS[$i]}${PLAIN} [$S_TEXT]"
         done
         echo -e " 0. 返回主選單"
         
         read -rp "請選擇數字: " T_CHOICE < /dev/tty
         [[ -z "$T_CHOICE" || "$T_CHOICE" == "0" ]] && return
         
-        # 檢查輸入是否為數字
         if ! [[ "$T_CHOICE" =~ ^[0-9]+$ ]] || [ "$T_CHOICE" -gt "${#TUNNELS[@]}" ]; then
             echo -e "${RED}無效選擇！${PLAIN}"; sleep 1; continue
         fi
 
         TARGET="${TUNNELS[$((T_CHOICE-1))]}"
         
-        # 子選單
         echo -e "\n正在管理: ${GREEN}$TARGET${PLAIN}"
-        echo -e "1. 查看日誌 | 2. 重啟 | 3. 編輯配置 | 4. 徹底刪除"
+        echo -e "1. 查看日誌 | 2. 重啟 | 3. 編輯配置 | 4. ${RED}徹底刪除${PLAIN}"
         read -rp "請選擇操作 [1-4]: " ACT < /dev/tty
         
         case $ACT in
             1) 
-               echo -e "${YELLOW}提示: 按 Q 鍵退出日誌查看並返回管理頁面${PLAIN}"
-               sleep 2
-               journalctl -u ${TARGET}.service -n 50 -f 
+               echo -e "${YELLOW}>>> 顯示最近 50 行日誌：${PLAIN}"
+               journalctl -u ${TARGET}.service -n 50 --no-pager
+               read -rp "按回車鍵返回..." dummy < /dev/tty
                ;;
             2) 
-               systemctl restart ${TARGET}.service && echo -e "${GREEN}服務已重啟${PLAIN}"; sleep 1 
+               systemctl restart ${TARGET}.service && echo -e "${GREEN}重啟成功${PLAIN}"; sleep 1 
                ;;
             3) 
-               nano ${CF_DIR}/${TARGET}.yml && systemctl restart ${TARGET}.service 
+               nano ${CF_DIR}/${TARGET}.yml < /dev/tty
+               systemctl restart ${TARGET}.service 
+               echo -e "${GREEN}配置已保存並重啟${PLAIN}"; sleep 1
                ;;
             4) 
-               read -rp "確認刪除 ${TARGET}? (y/n): " confirm < /dev/tty
+               read -rp "⚠️ 確認徹底刪除 ${TARGET}? (y/n): " confirm < /dev/tty
                if [[ "$confirm" == "y" ]]; then
                    systemctl stop ${TARGET} && systemctl disable ${TARGET}
                    UUID_DEL=$(grep 'tunnel:' ${CF_DIR}/${TARGET}.yml | awk '{print $2}')
                    rm -f /etc/systemd/system/${TARGET}.service ${CF_DIR}/${TARGET}.yml /root/.cloudflared/${UUID_DEL}.json
                    systemctl daemon-reload
-                   echo -e "${GREEN}已清理完成。${PLAIN}"; sleep 1; return
+                   echo -e "${GREEN}已清理完成${PLAIN}"; sleep 1; return
                fi
                ;;
-            *) 
-               echo -e "${RED}無效操作${PLAIN}"; sleep 1 
-               ;;
+            *) echo -e "${RED}無效操作${PLAIN}"; sleep 1 ;;
         esac
     done
 }
