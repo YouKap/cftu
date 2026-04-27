@@ -39,39 +39,68 @@ install_cf() {
 }
 
 create_tunnel() {
-    clear
     mkdir -p "$CF_DIR"
-    echo -e "${BLUE}=== ➕ 創建全新通道與深度 DNS 綁定 ===${PLAIN}"
-    [[ ! -f /root/.cloudflared/cert.pem ]] && echo -e "${RED}錯誤: 未檢測到登入憑證，請先執行選單 2。${PLAIN}" && sleep 2 && return
-
-    read -rp "1. 通道名稱 (自定義): " TUN_NAME < /dev/tty
-    [[ -z "$TUN_NAME" ]] && return
-
+    local STEP_TITLE="${BLUE}=== ➕ 創建全新通道與深度 DNS 綁定 ===${PLAIN}"
+    
+    # 步驟 1: 通道名稱
     while true; do
+        clear
+        echo -e "$STEP_TITLE"
+        [[ ! -f /root/.cloudflared/cert.pem ]] && echo -e "${RED}錯誤: 未檢測到登入憑證，請先執行選單 2。${PLAIN}" && sleep 2 && return
+        
+        read -rp "1. 通道名稱 (自定義): " TUN_NAME < /dev/tty
+        [[ -z "$TUN_NAME" ]] && return
+        break
+    done
+
+    # 步驟 2: 綁定網域 (增加回退刷新邏輯)
+    while true; do
+        clear
+        echo -e "$STEP_TITLE"
+        echo -e "1. 通道名稱: ${GREEN}$TUN_NAME${PLAIN}"
         read -rp "2. 綁定網域 (如 www.google.com): " TUN_DOMAIN < /dev/tty
+        
+        # 驗證網域格式
         if [[ "$TUN_DOMAIN" =~ ^[a-zA-Z0-9][-a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-a-zA-Z0-9]{0,62})+$ ]]; then
             break
         else
             echo -e "${RED}錯誤: [${TUN_DOMAIN}] 網域格式不正確！${PLAIN}"
+            sleep 1.5 # 停留一下讓用戶看清錯誤訊息
         fi
     done
 
+    # 步驟 3: 本地端口 (增加範圍校驗)
     USED_PORTS=$(grep -roE "127\.0\.0\.1:[0-9]+" $CF_DIR/*.yml 2>/dev/null | awk -F: '{print $NF}')
-    echo -e "3. 本地端口 (回車自動分配)"
-    read -rp "   輸入端口號 [1-65535]: " TUN_PORT < /dev/tty
-    if [[ -z "$TUN_PORT" ]]; then
-        while true; do
-            TUN_PORT=$(shuf -i 10000-60000 -n 1)
-            [[ ! "$USED_PORTS" =~ "$TUN_PORT" ]] && break
-        done
-        echo -e "${YELLOW}>>> 已分配唯一隨機端口: ${TUN_PORT}${PLAIN}"
-    else
-        if [[ "$USED_PORTS" =~ "$TUN_PORT" ]]; then
-            echo -e "${RED}警告: 端口 ${TUN_PORT} 已被佔用！${PLAIN}"
-            read -rp "強制使用？(y/N): " p_force < /dev/tty
-            [[ "$p_force" != "y" ]] && return
+    while true; do
+        clear
+        echo -e "$STEP_TITLE"
+        echo -e "1. 通道名稱: ${GREEN}$TUN_NAME${PLAIN}"
+        echo -e "2. 綁定網域: ${GREEN}$TUN_DOMAIN${PLAIN}"
+        echo -e "3. 本地端口 (回車自動分配)"
+        read -rp "   輸入端口號 [1-65535]: " TUN_PORT < /dev/tty
+        
+        if [[ -z "$TUN_PORT" ]]; then
+            while true; do
+                TUN_PORT=$(shuf -i 10000-60000 -n 1)
+                [[ ! "$USED_PORTS" =~ "$TUN_PORT" ]] && break
+            done
+            echo -e "${YELLOW}>>> 已分配隨機端口: ${TUN_PORT}${PLAIN}"
+            sleep 1
+            break
+        elif [[ "$TUN_PORT" =~ ^[0-9]+$ ]] && [ "$TUN_PORT" -ge 1 ] && [ "$TUN_PORT" -le 65535 ]; then
+            if [[ "$USED_PORTS" =~ "$TUN_PORT" ]]; then
+                echo -e "${RED}警告: 端口 ${TUN_PORT} 已被佔用！${PLAIN}"
+                read -rp "強制使用？(y/N): " p_force < /dev/tty
+                [[ "$p_force" == "y" ]] && break
+            else
+                break
+            fi
+        else
+            echo -e "${RED}錯誤: 端口號必須是 1-65535 之間的數字！${PLAIN}"
+            sleep 1.5
         fi
-    fi
+    done
+    
     TUN_TARGET="http://127.0.0.1:${TUN_PORT}"
 
     echo -e "${YELLOW}正在雲端創建通道...${PLAIN}"
