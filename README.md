@@ -7,4 +7,6 @@
 請使用 `root` 權限在終端機執行以下命令：
 
 ```bash
-curl -sSL [https://raw.githubusercontent.com/YouKap/cftu/main/cftu.sh](https://raw.githubusercontent.com/YouKap/cftu/main/cftu.sh) | sudo bash
+curl -sSL https://raw.githubusercontent.com/YouKap/cftu/main/cftu.sh | sudo bash
+```
+
