@@ -39,6 +39,7 @@ install_cf() {
 
 create_tunnel() {
     clear
+    mkdir -p "$CF_DIR"
     echo -e "${BLUE}=== ➕ 創建全新通道與深度 DNS 綁定 ===${PLAIN}"
     [[ ! -f /root/.cloudflared/cert.pem ]] && echo -e "${RED}錯誤: 未檢測到登入憑證，請先執行選單 2。${PLAIN}" && sleep 2 && return
 
@@ -268,7 +269,7 @@ while true; do
     
     echo -e "${BLUE}=================================================${PLAIN}"
     echo -e "  🚀 ${GREEN}Cloudflare Tunnel (cftu) 管理面板${PLAIN}"
-    echo -e "      快捷指令: cftu  |  版本: 1.0.5"
+    echo -e "      快捷指令: cftu  |  版本: 1.0.0"
     echo -e "${BLUE}=================================================${PLAIN}"
     echo -e "${YELLOW} 1.${PLAIN} 初始化環境並安裝 Cloudflared $ICON1"
     echo -e "${YELLOW} 2.${PLAIN} 登入 Cloudflare 帳號 $ICON2"
