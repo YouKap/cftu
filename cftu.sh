@@ -46,7 +46,7 @@ create_tunnel() {
     [[ -z "$TUN_NAME" ]] && return
 
     while true; do
-        read -rp "2. 綁定網域 (如 zoop.duntok.com): " TUN_DOMAIN < /dev/tty
+        read -rp "2. 綁定網域 (如 www.google.com): " TUN_DOMAIN < /dev/tty
         if [[ "$TUN_DOMAIN" =~ ^[a-zA-Z0-9][-a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-a-zA-Z0-9]{0,62})+$ ]]; then
             break
         else
