@@ -115,26 +115,42 @@ manage_tunnels() {
         read -rp "請選擇數字: " T_CHOICE < /dev/tty
         [[ -z "$T_CHOICE" || "$T_CHOICE" == "0" ]] && return
         
+        # 檢查輸入是否為數字
+        if ! [[ "$T_CHOICE" =~ ^[0-9]+$ ]] || [ "$T_CHOICE" -gt "${#TUNNELS[@]}" ]; then
+            echo -e "${RED}無效選擇！${PLAIN}"; sleep 1; continue
+        fi
+
         TARGET="${TUNNELS[$((T_CHOICE-1))]}"
         
         # 子選單
         echo -e "\n正在管理: ${GREEN}$TARGET${PLAIN}"
-        echo -e "1. 查看日誌 | 2. 重啟 | 3. 編輯配置 | 4. ${RED}徹底刪除${PLAIN}"
-        read -rp "請選擇操作: " ACT < /dev/tty
+        echo -e "1. 查看日誌 | 2. 重啟 | 3. 編輯配置 | 4. 徹底刪除"
+        read -rp "請選擇操作 [1-4]: " ACT < /dev/tty
         
-        case $act in
-            1) journalctl -u ${TARGET}.service -f ;;
-            2) systemctl restart ${TARGET}.service && echo "已重啟"; sleep 1 ;;
-            3) nano ${CF_DIR}/${TARGET}.yml && systemctl restart ${TARGET}.service ;;
+        case $ACT in
+            1) 
+               echo -e "${YELLOW}提示: 按 Q 鍵退出日誌查看並返回管理頁面${PLAIN}"
+               sleep 2
+               journalctl -u ${TARGET}.service -n 50 -f 
+               ;;
+            2) 
+               systemctl restart ${TARGET}.service && echo -e "${GREEN}服務已重啟${PLAIN}"; sleep 1 
+               ;;
+            3) 
+               nano ${CF_DIR}/${TARGET}.yml && systemctl restart ${TARGET}.service 
+               ;;
             4) 
                read -rp "確認刪除 ${TARGET}? (y/n): " confirm < /dev/tty
                if [[ "$confirm" == "y" ]]; then
                    systemctl stop ${TARGET} && systemctl disable ${TARGET}
                    UUID_DEL=$(grep 'tunnel:' ${CF_DIR}/${TARGET}.yml | awk '{print $2}')
-                   rm -f /etc/systemd/system/${TARGET}.service ${CF_DIR}/${TARGET}.yml ${CREDS_DIR}/${UUID_DEL}.json
+                   rm -f /etc/systemd/system/${TARGET}.service ${CF_DIR}/${TARGET}.yml /root/.cloudflared/${UUID_DEL}.json
                    systemctl daemon-reload
-                   echo "已清理。"; sleep 1; return
+                   echo -e "${GREEN}已清理完成。${PLAIN}"; sleep 1; return
                fi
+               ;;
+            *) 
+               echo -e "${RED}無效操作${PLAIN}"; sleep 1 
                ;;
         esac
     done
