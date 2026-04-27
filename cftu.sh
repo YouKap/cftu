@@ -61,7 +61,7 @@ create_tunnel() {
         read -rp "2. 綁定網域 (如 www.google.com): " TUN_DOMAIN < /dev/tty
         
         # 驗證網域格式
-        if [[ "$TUN_DOMAIN" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+        if [[ "$TUN_DOMAIN" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,7}$ ]]; then
             break
         else
             echo -e "${RED}錯誤: [${TUN_DOMAIN}] 網域格式不正確！${PLAIN}"
