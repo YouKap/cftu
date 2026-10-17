@@ -66,6 +66,28 @@ extract_port() {
     echo "$P"
 }
 
+# 格式化輸出主面板頂部通道即時狀態
+print_dashboard_status() {
+    local TUNNELS=( $(ls -1 $CF_DIR/*.yml 2>/dev/null | xargs -n 1 basename | sed 's/\.yml//g') )
+    if [[ ${#TUNNELS[@]} -eq 0 ]]; then
+        echo -e " 📊 通道狀態: ${YELLOW}尚無配置通道 (請選 3 新建)${PLAIN}"
+    else
+        for t in "${TUNNELS[@]}"; do
+            local YML_FILE="${CF_DIR}/${t}.yml"
+            local STATUS=$(systemctl is-active ${t}.service 2>/dev/null)
+            local DOMAIN_INFO=$(extract_domain "$YML_FILE")
+            local PORT_INFO=$(extract_port "$YML_FILE")
+            local PROF_TAG=$(detect_profile "$YML_FILE")
+            
+            if [[ "$STATUS" == "active" ]]; then
+                echo -e " 通道 [${GREEN}${t}${PLAIN}] : ${GREEN}運行中${PLAIN} | 網域: ${BLUE}${DOMAIN_INFO}${PLAIN} (端口:${PORT_INFO}) | ${PROF_TAG}"
+            else
+                echo -e " 通道 [${RED}${t}${PLAIN}] : ${RED}未運行 ($STATUS)${PLAIN} | 網域: ${BLUE}${DOMAIN_INFO}${PLAIN} (端口:${PORT_INFO}) | ${PROF_TAG}"
+            fi
+        done
+    fi
+}
+
 # 根據異化類型生成最優的 YAML 配置
 write_tunnel_yaml() {
     local TYPE="$1"
@@ -330,9 +352,11 @@ manage_tunnels() {
         fi
 
         for i in "${!TUNNELS[@]}"; do
+            YML_FILE="${CF_DIR}/${TUNNELS[$i]}.yml"
             ST=$(systemctl is-active ${TUNNELS[$i]}.service 2>/dev/null)
             [[ "$ST" == "active" ]] && S_TEXT="${GREEN}● 運行中${PLAIN}" || S_TEXT="${RED}○ 已停止${PLAIN}"
-            echo -e " ${YELLOW}$((i+1)).${PLAIN} 通道: ${BLUE}${TUNNELS[$i]}${PLAIN} [$S_TEXT]"
+            PROF_TAG=$(detect_profile "$YML_FILE")
+            echo -e " ${YELLOW}$((i+1)).${PLAIN} 通道: ${BLUE}${TUNNELS[$i]}${PLAIN} [$S_TEXT] $PROF_TAG"
         done
         echo -e " 0. 返回主選單"
         
@@ -378,7 +402,7 @@ manage_tunnels() {
 
 show_status() {
     clear
-    echo -e "${BLUE}=== 📊 運行狀態總覽 ===${PLAIN}"
+    echo -e "${BLUE}=== 📊 運行狀態總覽與後端探測 ===${PLAIN}"
     TUNNELS=( $(ls -1 $CF_DIR/*.yml 2>/dev/null | xargs -n 1 basename | sed 's/\.yml//g') )
     if [[ ${#TUNNELS[@]} -eq 0 ]]; then
         echo -e "${YELLOW}目前沒有任何已配置的通道。${PLAIN}"
@@ -390,11 +414,19 @@ show_status() {
             PORT_INFO=$(extract_port "$YML_FILE")
             PROF_TAG=$(detect_profile "$YML_FILE")
             
+            # 本地端口後端連通性檢測
+            if (echo > /dev/tcp/127.0.0.1/${PORT_INFO}) >/dev/null 2>&1; then
+                BACKEND_STATUS="${GREEN}已就緒 (127.0.0.1:${PORT_INFO} 正常監聽)${PLAIN}"
+            else
+                BACKEND_STATUS="${RED}未監聽 (請確認容器內後端服務是否啟動)${PLAIN}"
+            fi
+
             if [[ "$STATUS" == "active" ]]; then
                 echo -e "通道 [${GREEN}${t}${PLAIN}] : ${GREEN}運行中${PLAIN} | 網域: ${BLUE}${DOMAIN_INFO}${PLAIN} (端口:${PORT_INFO}) | ${PROF_TAG}"
             else
-                echo -e "通道 [${RED}${t}${PLAIN}] : ${RED}未運行 ($STATUS)${PLAIN} | 網域: ${BLUE}${DOMAIN_INFO}${PLAIN} (端口:${PORT_INFO})"
+                echo -e "通道 [${RED}${t}${PLAIN}] : ${RED}未運行 ($STATUS)${PLAIN} | 網域: ${BLUE}${DOMAIN_INFO}${PLAIN} (端口:${PORT_INFO}) | ${PROF_TAG}"
             fi
+            echo -e "  └─ 本地後端: ${BACKEND_STATUS}"
         done
     fi
     echo -e "-------------------------------------------------"
@@ -473,13 +505,15 @@ while true; do
     
     echo -e "${BLUE}=================================================${PLAIN}"
     echo -e "  🚀 ${GREEN}Cloudflare Tunnel (cftu) 管理面板${PLAIN}"
-    echo -e "      架構: Incus 容器獨立隧道  |  版本: 2.1.1"
+    echo -e "      架構: Incus 容器獨立隧道  |  版本: 2.2.0"
     echo -e "${BLUE}=================================================${PLAIN}"
+    print_dashboard_status
+    echo -e "${BLUE}-------------------------------------------------${PLAIN}"
     echo -e "${YELLOW} 1.${PLAIN} 初始化環境並安裝 Cloudflared $ICON1"
     echo -e "${YELLOW} 2.${PLAIN} 登入 Cloudflare 帳號 $ICON2"
     echo -e "-------------------------------------------------"
     echo -e "${YELLOW} 3.${PLAIN} ${GREEN}➕ 新建並發佈通道 (預設 52880, 支援場景異化)${PLAIN}"
-    echo -e "${YELLOW} 4.${PLAIN} ${CYAN}🔄 切換/升級通道配置 (網站 ⇋ 代理)${PLAIN}"
+    echo -e "${YELLOW} 4.${PLAIN} ${CYAN}🔄 切換/升級通道配置 (網站/代理)${PLAIN}"
     echo -e "${YELLOW} 5.${PLAIN} ⚙️  管理現有通道 (日誌 / 重啟 / nano編輯 / 刪除)"
     echo -e "${YELLOW} 6.${PLAIN} 📊 查看通道運行狀態與網域"
     echo -e "-------------------------------------------------"
