@@ -11,6 +11,7 @@ PLAIN='\033[0m'
 SCRIPT_URL="https://raw.githubusercontent.com/YouKap/cftu/main/cftu.sh"
 CF_DIR="/etc/cloudflared"
 CREDS_DIR="/root/.cloudflared"
+DEFAULT_PORT="52880"
 
 # 確保以 Root 權限執行
 [[ $EUID -ne 0 ]] && echo -e "${RED}錯誤: 必須以 root 執行！${PLAIN}" && exit 1
@@ -18,8 +19,7 @@ CREDS_DIR="/root/.cloudflared"
 # 自我安裝與執行環境校正
 if [[ "$0" != "/usr/local/bin/cftu" ]]; then
     echo -e "${BLUE}>>> 正在同步腳本至全域環境...${PLAIN}"
-    curl -sSL "$SCRIPT_URL" -o /usr/local/bin/cftu && chmod +x /usr/local/bin/cftu
-    exec /usr/local/bin/cftu
+    curl -sSL "$SCRIPT_URL" -o /usr/local/bin/cftu 2>/dev/null && chmod +x /usr/local/bin/cftu
 fi
 
 # ==========================================
@@ -29,7 +29,7 @@ fi
 install_cf() {
     clear
     echo -e "${BLUE}正在安裝 Cloudflared 環境...${PLAIN}"
-    mkdir -p /etc/cloudflared
+    mkdir -p "$CF_DIR"
     apt-get update && apt-get install -y curl wget gnupg sudo systemd mawk nano
     mkdir -p --mode=0755 /usr/share/keyrings
     curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | sudo tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null
@@ -38,72 +38,149 @@ install_cf() {
     read -rp "安裝完成，按回車鍵返回..." dummy < /dev/tty
 }
 
+# 檢測當前 YAML 配置屬於哪種模板
+detect_profile() {
+    local FILE="$1"
+    if grep -q "disableChunkedEncoding: true" "$FILE" 2>/dev/null; then
+        echo -e "${CYAN}[🚀 代理模式]${PLAIN}"
+    elif grep -q "http2Origin: true" "$FILE" 2>/dev/null; then
+        echo -e "${GREEN}[🌐 網站模式]${PLAIN}"
+    elif grep -q "no-multistream" "$FILE" 2>/dev/null; then
+        echo -e "${YELLOW}[⚠️ 舊版配置(含失效參數)]${PLAIN}"
+    else
+        echo -e "${BLUE}[⚙️ 標準模式]${PLAIN}"
+    fi
+}
+
+# 根據異化類型生成最優的 YAML 配置 (端口預設 52880)
+write_tunnel_yaml() {
+    local TYPE="$1"
+    local UUID="$2"
+    local DOMAIN="$3"
+    local PORT="$4"
+    local FILE="$5"
+
+    case $TYPE in
+        1) # 🌐 網站業務專用模板 (Web / Nginx / API)
+            cat > "$FILE" << EOF
+tunnel: ${UUID}
+credentials-file: ${CREDS_DIR}/${UUID}.json
+protocol: http2
+ha-connections: 8
+no-prechecks: true
+grace-period: 30s
+loglevel: warn
+
+originRequest:
+  connectTimeout: 5s
+  noHappyEyeballs: true
+  keepAliveConnections: 500
+  keepAliveTimeout: 90s
+  http2Origin: true
+
+ingress:
+  - hostname: ${DOMAIN}
+    service: http://127.0.0.1:${PORT}
+  - service: http_status:404
+EOF
+            ;;
+        2) # 🚀 代理服務專用模板 (VLESS / Xray WS)
+            cat > "$FILE" << EOF
+tunnel: ${UUID}
+credentials-file: ${CREDS_DIR}/${UUID}.json
+protocol: http2
+ha-connections: 8
+no-prechecks: true
+grace-period: 30s
+loglevel: warn
+
+originRequest:
+  connectTimeout: 5s
+  noHappyEyeballs: true
+  disableChunkedEncoding: true
+  keepAliveConnections: 200
+  keepAliveTimeout: 120s
+  tcpKeepAlive: 30s
+
+ingress:
+  - hostname: ${DOMAIN}
+    service: http://127.0.0.1:${PORT}
+  - service: http_status:404
+EOF
+            ;;
+        *) # ⚙️ 通用基礎模板
+            cat > "$FILE" << EOF
+tunnel: ${UUID}
+credentials-file: ${CREDS_DIR}/${UUID}.json
+protocol: http2
+ha-connections: 4
+no-prechecks: true
+grace-period: 30s
+loglevel: warn
+
+originRequest:
+  connectTimeout: 10s
+  noHappyEyeballs: true
+
+ingress:
+  - hostname: ${DOMAIN}
+    service: http://127.0.0.1:${PORT}
+  - service: http_status:404
+EOF
+            ;;
+    esac
+}
+
 create_tunnel() {
     mkdir -p "$CF_DIR"
-    local STEP_TITLE="${BLUE}=== ➕ 創建全新通道與深度 DNS 綁定 ===${PLAIN}"
+    local STEP_TITLE="${BLUE}=== ➕ 創建通道 (預設 52880，支援 網站/代理 異化調優) ===${PLAIN}"
+    [[ ! -f /root/.cloudflared/cert.pem ]] && echo -e "${RED}錯誤: 未檢測到登入憑證，請先執行選單 2。${PLAIN}" && sleep 2 && return
     
-    # 步驟 1: 通道名稱
+    # 步驟 1: 選擇業務場景
+    clear
+    echo -e "$STEP_TITLE"
+    echo -e "請選擇當前容器運行的【業務場景】：\n"
+    echo -e "  ${YELLOW}1.${PLAIN} 🌐 ${GREEN}網站業務${PLAIN} (Web/Nginx - 優化本地 HTTP/2 直通, 500 連線池)"
+    echo -e "  ${YELLOW}2.${PLAIN} 🚀 ${GREEN}代理服務${PLAIN} (VLESS/WS - 停用 Chunked 防斷流, 120s 長保活)"
+    echo -e "  ${YELLOW}3.${PLAIN} ⚙️  通用模式 (標準基礎設定)"
+    read -rp "請選擇模式 [1-3, 預設 1]: " SCENE_TYPE < /dev/tty
+    [[ -z "$SCENE_TYPE" ]] && SCENE_TYPE=1
+
+    # 步驟 2: 通道名稱
     while true; do
         clear
         echo -e "$STEP_TITLE"
-        [[ ! -f /root/.cloudflared/cert.pem ]] && echo -e "${RED}錯誤: 未檢測到登入憑證，請先執行選單 2。${PLAIN}" && sleep 2 && return
-        
-        read -rp "1. 通道名稱 (自定義): " TUN_NAME < /dev/tty
+        read -rp "1. 通道名稱 (如 web 或 vless): " TUN_NAME < /dev/tty
         [[ -z "$TUN_NAME" ]] && return
         break
     done
 
-    # 步驟 2: 綁定網域 (增加回退刷新邏輯)
+    # 步驟 3: 綁定網域
     while true; do
         clear
         echo -e "$STEP_TITLE"
         echo -e "1. 通道名稱: ${GREEN}$TUN_NAME${PLAIN}"
-        read -rp "2. 綁定網域 (如 www.google.com): " TUN_DOMAIN < /dev/tty
-        
-        # 驗證網域格式
+        read -rp "2. 綁定網域 (如 www.yourdomain.com 或 dash.yourdomain.com): " TUN_DOMAIN < /dev/tty
         if [[ "$TUN_DOMAIN" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,7}$ ]]; then
             break
         else
             echo -e "${RED}錯誤: [${TUN_DOMAIN}] 網域格式不正確！${PLAIN}"
-            sleep 1.5 # 停留一下讓用戶看清錯誤訊息
-        fi
-    done
-
-    # 步驟 3: 本地端口 (增加範圍校驗)
-    USED_PORTS=$(grep -roE "127\.0\.0\.1:[0-9]+" $CF_DIR/*.yml 2>/dev/null | awk -F: '{print $NF}')
-    while true; do
-        clear
-        echo -e "$STEP_TITLE"
-        echo -e "1. 通道名稱: ${GREEN}$TUN_NAME${PLAIN}"
-        echo -e "2. 綁定網域: ${GREEN}$TUN_DOMAIN${PLAIN}"
-        echo -e "3. 本地端口 (回車自動分配)"
-        read -rp "   輸入端口號 [1-65535]: " TUN_PORT < /dev/tty
-        
-        if [[ -z "$TUN_PORT" ]]; then
-            while true; do
-                TUN_PORT=$(shuf -i 10000-60000 -n 1)
-                [[ ! "$USED_PORTS" =~ "$TUN_PORT" ]] && break
-            done
-            echo -e "${YELLOW}>>> 已分配隨機端口: ${TUN_PORT}${PLAIN}"
-            sleep 1
-            break
-        elif [[ "$TUN_PORT" =~ ^[0-9]+$ ]] && [ "$TUN_PORT" -ge 1 ] && [ "$TUN_PORT" -le 65535 ]; then
-            if [[ "$USED_PORTS" =~ "$TUN_PORT" ]]; then
-                echo -e "${RED}警告: 端口 ${TUN_PORT} 已被佔用！${PLAIN}"
-                read -rp "強制使用？(y/N): " p_force < /dev/tty
-                [[ "$p_force" == "y" ]] && break
-            else
-                break
-            fi
-        else
-            echo -e "${RED}錯誤: 端口號必須是 1-65535 之間的數字！${PLAIN}"
             sleep 1.5
         fi
     done
+
+    # 步驟 4: 本地端口 (預設 52880)
+    clear
+    echo -e "$STEP_TITLE"
+    echo -e "1. 通道名稱: ${GREEN}$TUN_NAME${PLAIN}"
+    echo -e "2. 綁定網域: ${GREEN}$TUN_DOMAIN${PLAIN}"
+    echo -e "3. 本地服務端口 [預設: ${CYAN}${DEFAULT_PORT}${PLAIN}，直接回車即可]"
+    read -rp "   自定義端口 (直接回車使用 ${DEFAULT_PORT}): " TUN_PORT < /dev/tty
+    [[ -z "$TUN_PORT" ]] && TUN_PORT="$DEFAULT_PORT"
     
     TUN_TARGET="http://127.0.0.1:${TUN_PORT}"
 
-    echo -e "${YELLOW}正在雲端創建通道...${PLAIN}"
+    echo -e "\n${YELLOW}正在雲端創建通道...${PLAIN}"
     CREATE_OUT=$(cloudflared tunnel create "$TUN_NAME" 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${RED}創建失敗: $CREATE_OUT${PLAIN}"
@@ -120,18 +197,10 @@ create_tunnel() {
         [[ $? -eq 0 ]] && DNS_STATUS="${GREEN}✅ 綁定成功${PLAIN}" || DNS_STATUS="${RED}❌ 綁定失敗 (請手動檢查 DNS 面板)${PLAIN}"
     fi
 
-    cat > ${CF_DIR}/${TUN_NAME}.yml << EOF
-tunnel: ${UUID}
-credentials-file: ${CREDS_DIR}/${UUID}.json
-protocol: http2
-ha-connections: 8
-no-multistream: true
-ingress:
-  - hostname: ${TUN_DOMAIN}
-    service: ${TUN_TARGET}
-  - service: http_status:404
-EOF
+    # 寫入異化配置
+    write_tunnel_yaml "$SCENE_TYPE" "$UUID" "$TUN_DOMAIN" "$TUN_PORT" "${CF_DIR}/${TUN_NAME}.yml"
 
+    # 註冊 systemd 服務
     cat > /etc/systemd/system/${TUN_NAME}.service << EOF
 [Unit]
 Description=CF-Tunnel-${TUN_NAME}
@@ -152,14 +221,89 @@ EOF
     echo -e "綁定網域: ${BLUE}${TUN_DOMAIN}${PLAIN}"
     echo -e "DNS 狀態: ${DNS_STATUS}"
     echo -e "本地服務: ${BLUE}${TUN_TARGET}${PLAIN}"
+    [[ "$SCENE_TYPE" == "1" ]] && echo -e "策略調優: ${GREEN}🌐 網站業務高並發優化模板${PLAIN}"
+    [[ "$SCENE_TYPE" == "2" ]] && echo -e "策略調優: ${GREEN}🚀 VLESS/WS 代理防斷流長連線模板${PLAIN}"
     echo -e "-------------------------------------------------"
     read -rp "回車返回主選單..." d < /dev/tty
+}
+
+# --- 【新增獨立模組：選項 4 切換/升級通道配置】 ---
+switch_tunnel_profile() {
+    while true; do
+        clear
+        echo -e "${BLUE}=== 🔄 切換/升級通道配置 (網站 ⇋ 代理 異化調優) ===${PLAIN}"
+        TUNNELS=( $(ls -1 $CF_DIR/*.yml 2>/dev/null | xargs -n 1 basename | sed 's/\.yml//g') )
+        
+        if [ ${#TUNNELS[@]} -eq 0 ]; then
+            echo -e "${YELLOW}暫無通道項目，請先新建通道。${PLAIN}"
+            read -rp "按回車返回主選單..." d < /dev/tty
+            return
+        fi
+
+        echo -e "請選擇需要切換/升級配置的通道："
+        for i in "${!TUNNELS[@]}"; do
+            YML_FILE="${CF_DIR}/${TUNNELS[$i]}.yml"
+            PROF_TAG=$(detect_profile "$YML_FILE")
+            echo -e " ${YELLOW}$((i+1)).${PLAIN} 通道: ${BLUE}${TUNNELS[$i]}${PLAIN} -> 當前狀態: $PROF_TAG"
+        done
+        echo -e " 0. 返回主選單\n"
+        
+        read -rp "請選擇通道編號 [0-${#TUNNELS[@]}]: " T_CHOICE < /dev/tty
+        [[ -z "$T_CHOICE" || "$T_CHOICE" == "0" ]] && return
+        
+        if ! [[ "$T_CHOICE" =~ ^[0-9]+$ ]] || [ "$T_CHOICE" -gt "${#TUNNELS[@]}" ]; then
+            echo -e "${RED}輸入無效！${PLAIN}"; sleep 1; continue
+        fi
+
+        TARGET="${TUNNELS[$((T_CHOICE-1))]}"
+        YML_PATH="${CF_DIR}/${TARGET}.yml"
+
+        # 讀取現有配置的核心資訊
+        UUID_CUR=$(grep 'tunnel:' "$YML_PATH" 2>/dev/null | awk '{print $2}')
+        DOM_CUR=$(grep 'hostname:' "$YML_PATH" 2>/dev/null | awk '{print $2}')
+        PORT_CUR=$(grep 'service:' "$YML_PATH" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+        [[ -z "$PORT_CUR" ]] && PORT_CUR="$DEFAULT_PORT"
+
+        if [[ -z "$UUID_CUR" || -z "$DOM_CUR" ]]; then
+            echo -e "${RED}錯誤: 無法讀取通道 [${TARGET}] 的 UUID 或網域資訊，檔案可能損壞！${PLAIN}"
+            read -rp "按回車鍵返回..." d < /dev/tty
+            continue
+        fi
+
+        echo -e "\n當前選中通道: ${CYAN}${TARGET}${PLAIN} (網域: ${BLUE}${DOM_CUR}${PLAIN}, 端口: ${PORT_CUR})"
+        echo -e "-------------------------------------------------"
+        echo -e "請選擇欲套用的新最優模板："
+        echo -e "  ${YELLOW}1.${PLAIN} 🌐 ${GREEN}切換為【網站業務高並發優化模板】${PLAIN}"
+        echo -e "      (配置: HTTP/2 Origin 直通, 500 並發連線池, 5s 握手逾時)"
+        echo -e "  ${YELLOW}2.${PLAIN} 🚀 ${GREEN}切換為【VLESS 代理防斷流長連線模板】${PLAIN}"
+        echo -e "      (配置: 停用 Chunked 編碼防斷流, 120s 長 KeepAlive, 30s TCP 保活)"
+        echo -e "  ${YELLOW}3.${PLAIN} ⚙️  切換為【通用標準模板】"
+        echo -e "  0. 放棄變更並返回"
+        echo -e "-------------------------------------------------"
+        read -rp "請選擇目標模式 [1-3]: " NEW_TYPE < /dev/tty
+        [[ -z "$NEW_TYPE" || "$NEW_TYPE" == "0" ]] && continue
+
+        if [[ "$NEW_TYPE" == "1" || "$NEW_TYPE" == "2" || "$NEW_TYPE" == "3" ]]; then
+            echo -e "\n${YELLOW}正在重構 YAML 設定檔並清除舊無效參數...${PLAIN}"
+            write_tunnel_yaml "$NEW_TYPE" "$UUID_CUR" "$DOM_CUR" "$PORT_CUR" "$YML_PATH"
+            
+            echo -e "${YELLOW}正在重啟通道服務使新參數生效...${PLAIN}"
+            systemctl daemon-reload
+            systemctl restart ${TARGET}.service
+            
+            echo -e "${GREEN}✅ 通道 [${TARGET}] 已成功無縫升級並重啟生效！${PLAIN}"
+            [[ "$NEW_TYPE" == "1" ]] && echo -e "當前模式已變更為: ${GREEN}🌐 網站高並發模式${PLAIN}"
+            [[ "$NEW_TYPE" == "2" ]] && echo -e "當前模式已變更為: ${CYAN}🚀 VLESS 防斷流模式${PLAIN}"
+            echo -e "-------------------------------------------------"
+            read -rp "按回車鍵返回..." d < /dev/tty
+        fi
+    done
 }
 
 manage_tunnels() {
     while true; do
         clear
-        echo -e "${BLUE}=== ⚙️ 管理現有通道 ===${PLAIN}"
+        echo -e "${BLUE}=== ⚙️ 管理現有通道 (常規維護) ===${PLAIN}"
         TUNNELS=( $(ls -1 $CF_DIR/*.yml 2>/dev/null | xargs -n 1 basename | sed 's/\.yml//g') )
         
         if [ ${#TUNNELS[@]} -eq 0 ]; then
@@ -177,21 +321,25 @@ manage_tunnels() {
         [[ -z "$T_CHOICE" || "$T_CHOICE" == "0" ]] && return
         
         TARGET="${TUNNELS[$((T_CHOICE-1))]}"
+        YML_PATH="${CF_DIR}/${TARGET}.yml"
         
-        echo -e "\n當前操作: ${CYAN}${TARGET}${PLAIN}"
-        echo -e " 1. 檢視日誌 | 2. 重啟服務 | 3. 編輯配置 | 4. ${RED}徹底刪除${PLAIN}"
+        echo -e "\n當前操作通道: ${CYAN}${TARGET}${PLAIN}"
+        echo -e " 1. 檢視即時日誌 (50 行)"
+        echo -e " 2. 重啟此通道服務"
+        echo -e " 3. 手動編輯原始設定檔 (nano)"
+        echo -e " 4. ${RED}徹底刪除此通道 (包含雲端與 DNS 記錄)${PLAIN}"
         read -rp "選擇操作 [1-4]: " ACT < /dev/tty
         
         case $ACT in
             1) journalctl -u ${TARGET}.service -n 50 --no-pager; read -rp "回車返回..." d < /dev/tty ;;
             2) systemctl restart ${TARGET}.service && echo -e "${GREEN}重啟成功${PLAIN}"; sleep 1 ;;
-            3) nano ${CF_DIR}/${TARGET}.yml < /dev/tty && systemctl restart ${TARGET}.service; echo -e "${GREEN}已重啟${PLAIN}"; sleep 1 ;;
+            3) nano "$YML_PATH" < /dev/tty && systemctl restart ${TARGET}.service; echo -e "${GREEN}已重啟生效${PLAIN}"; sleep 1 ;;
             4) 
                echo -e "${RED}警告：這將同步刪除雲端隧道與 DNS 記錄！${PLAIN}"
                read -rp "確定刪除 ${TARGET} 嗎？[y/N]: " confirm < /dev/tty
                if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-                   UUID_DEL=$(grep 'tunnel:' ${CF_DIR}/${TARGET}.yml | awk '{print $2}')
-                   DOM_DEL=$(grep 'hostname:' ${CF_DIR}/${TARGET}.yml | awk '{print $2}')
+                   UUID_DEL=$(grep 'tunnel:' "$YML_PATH" 2>/dev/null | awk '{print $2}')
+                   DOM_DEL=$(grep 'hostname:' "$YML_PATH" 2>/dev/null | awk '{print $2}')
                    
                    systemctl stop ${TARGET} 2>/dev/null
                    systemctl disable ${TARGET} 2>/dev/null
@@ -201,7 +349,7 @@ manage_tunnels() {
                        cloudflared tunnel delete -f "$UUID_DEL" >/dev/null 2>&1
                    fi
 
-                   rm -f /etc/systemd/system/${TARGET}.service ${CF_DIR}/${TARGET}.yml ${CREDS_DIR}/${UUID_DEL}.json
+                   rm -f /etc/systemd/system/${TARGET}.service "$YML_PATH" ${CREDS_DIR}/${UUID_DEL}.json
                    systemctl daemon-reload
                    echo -e "${GREEN}✅ 徹底刪除完成！${PLAIN}"; sleep 2; return
                fi ;;
@@ -217,19 +365,27 @@ show_status() {
         echo -e "${YELLOW}目前沒有任何已配置的通道。${PLAIN}"
     else
         for t in "${TUNNELS[@]}"; do
+            YML_FILE="${CF_DIR}/${t}.yml"
             STATUS=$(systemctl is-active ${t}.service 2>/dev/null)
-            [[ "$STATUS" == "active" ]] && echo -e "通道 [${GREEN}${t}${PLAIN}] : ${GREEN}正常運行中${PLAIN}" || echo -e "通道 [${RED}${t}${PLAIN}] : ${RED}未運行 ($STATUS)${PLAIN}"
+            DOMAIN_INFO=$(grep 'hostname:' "$YML_FILE" 2>/dev/null | awk '{print $2}')
+            PORT_INFO=$(grep 'service:' "$YML_FILE" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+            PROF_TAG=$(detect_profile "$YML_FILE")
+            
+            if [[ "$STATUS" == "active" ]]; then
+                echo -e "通道 [${GREEN}${t}${PLAIN}] : ${GREEN}運行中${PLAIN} | 網域: ${BLUE}${DOMAIN_INFO}${PLAIN} (端口:${PORT_INFO}) | ${PROF_TAG}"
+            else
+                echo -e "通道 [${RED}${t}${PLAIN}] : ${RED}未運行 ($STATUS)${PLAIN}"
+            fi
         done
     fi
     echo -e "-------------------------------------------------"
     read -rp "按回車鍵返回..." dummy < /dev/tty
 }
 
-# --- 新增：選項 6 清理日誌並重啟 ---
 clean_and_restart() {
     clear
     echo -e "${BLUE}=== 🧹 清理日誌並重啟所有服務 ===${PLAIN}"
-    echo -e "${YELLOW}正在清理系統日誌空間...${PLAIN}"
+    echo -e "${YELLOW}正在清理系統 journal 日誌空間...${PLAIN}"
     journalctl --rotate >/dev/null 2>&1
     journalctl --vacuum-time=1s >/dev/null 2>&1
     
@@ -246,7 +402,6 @@ clean_and_restart() {
     read -rp "按回車鍵返回主選單..." dummy < /dev/tty
 }
 
-# --- 新增：選項 7 徹底清理所有服務 ---
 nuke_all_tunnels() {
     clear
     echo -e "${RED}=================================================${PLAIN}"
@@ -265,8 +420,8 @@ nuke_all_tunnels() {
         else
             for t in "${TUNNELS[@]}"; do
                 echo -e "${BLUE}>>> 正在銷毀通道: ${t}${PLAIN}"
-                UUID_DEL=$(grep 'tunnel:' ${CF_DIR}/${t}.yml | awk '{print $2}')
-                DOM_DEL=$(grep 'hostname:' ${CF_DIR}/${t}.yml | awk '{print $2}')
+                UUID_DEL=$(grep 'tunnel:' ${CF_DIR}/${t}.yml 2>/dev/null | awk '{print $2}')
+                DOM_DEL=$(grep 'hostname:' ${CF_DIR}/${t}.yml 2>/dev/null | awk '{print $2}')
                 
                 systemctl stop ${t} 2>/dev/null
                 systemctl disable ${t} 2>/dev/null
@@ -281,7 +436,7 @@ nuke_all_tunnels() {
                 rm -f ${CREDS_DIR}/${UUID_DEL}.json
             done
             systemctl daemon-reload
-            echo -e "\n${GREEN}✅ 所有通道服務已徹底從本地與雲端清理完畢！${PLAIN}"
+            echo -e "\n${GREEN}✅ 所有通道服務已徹底清理完畢！${PLAIN}"
         fi
     else
         echo -e "\n${BLUE}已取消操作。${PLAIN}"
@@ -290,7 +445,7 @@ nuke_all_tunnels() {
 }
 
 # ==========================================
-# 主介面循環
+# 主選單循環
 # ==========================================
 while true; do
     clear
@@ -299,32 +454,34 @@ while true; do
     
     echo -e "${BLUE}=================================================${PLAIN}"
     echo -e "  🚀 ${GREEN}Cloudflare Tunnel (cftu) 管理面板${PLAIN}"
-    echo -e "      快捷指令: cftu  |  版本: 1.0.0"
+    echo -e "      架構: Incus 容器獨立隧道  |  版本: 2.1.0"
     echo -e "${BLUE}=================================================${PLAIN}"
     echo -e "${YELLOW} 1.${PLAIN} 初始化環境並安裝 Cloudflared $ICON1"
     echo -e "${YELLOW} 2.${PLAIN} 登入 Cloudflare 帳號 $ICON2"
     echo -e "-------------------------------------------------"
-    echo -e "${YELLOW} 3.${PLAIN} ${GREEN}➕ 新建並發佈通道 (自動生成配置)${PLAIN}"
-    echo -e "${YELLOW} 4.${PLAIN} ⚙️  管理/修改/單獨刪除 現有通道"
-    echo -e "${YELLOW} 5.${PLAIN} 📊 查看所有通道運行狀態"
+    echo -e "${YELLOW} 3.${PLAIN} ${GREEN}➕ 新建並發佈通道 (預設 52880, 支援場景異化)${PLAIN}"
+    echo -e "${YELLOW} 4.${PLAIN} ${CYAN}🔄 切換/升級通道配置 (網站 ⇋ 代理 舊配置升級)${PLAIN}"
+    echo -e "${YELLOW} 5.${PLAIN} ⚙️  管理現有通道 (日誌 / 重啟 / nano編輯 / 刪除)"
+    echo -e "${YELLOW} 6.${PLAIN} 📊 查看通道運行狀態與網域"
     echo -e "-------------------------------------------------"
-    echo -e "${YELLOW} 6.${PLAIN} 🧹 清理日誌並重啟所有服務"
-    echo -e "${RED} 7.${PLAIN} 💥 徹底清理所有服務"
+    echo -e "${YELLOW} 7.${PLAIN} 🧹 清理日誌並重啟所有服務"
+    echo -e "${RED} 8.${PLAIN} 💥 徹底清理所有服務"
     echo -e "-------------------------------------------------"
     echo -e "${YELLOW} 0.${PLAIN} 退出腳本"
     echo -e "${BLUE}=================================================${PLAIN}"
     
-    read -rp "請選擇數字 [0-7]: " choice < /dev/tty
+    read -rp "請選擇數字 [0-8]: " choice < /dev/tty
     [[ -z "$choice" ]] && continue
 
     case $choice in
         1) install_cf ;;
         2) cloudflared tunnel login ;;
         3) create_tunnel ;;
-        4) manage_tunnels ;;
-        5) show_status ;;
-        6) clean_and_restart ;;
-        7) nuke_all_tunnels ;;
+        4) switch_tunnel_profile ;;
+        5) manage_tunnels ;;
+        6) show_status ;;
+        7) clean_and_restart ;;
+        8) nuke_all_tunnels ;;
         0) exit 0 ;;
         *) echo -e "${RED}無效選擇${PLAIN}"; sleep 1 ;;
     esac
