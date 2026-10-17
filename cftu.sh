@@ -52,7 +52,21 @@ detect_profile() {
     fi
 }
 
-# 根據異化類型生成最優的 YAML 配置 (端口預設 52880)
+# 安全提取網域 (相容有減號或無減號的 YAML 格式)
+extract_domain() {
+    local FILE="$1"
+    sed -n 's/.*hostname:[[:space:]]*//p' "$FILE" 2>/dev/null | head -1 | tr -d ' "\r\t'
+}
+
+# 安全提取端口
+extract_port() {
+    local FILE="$1"
+    local P=$(grep -oE '127\.0\.0\.1:[0-9]+' "$FILE" 2>/dev/null | head -1 | cut -d: -f2)
+    [[ -z "$P" || "$P" == "127" ]] && P="$DEFAULT_PORT"
+    echo "$P"
+}
+
+# 根據異化類型生成最優的 YAML 配置
 write_tunnel_yaml() {
     local TYPE="$1"
     local UUID="$2"
@@ -227,7 +241,7 @@ EOF
     read -rp "回車返回主選單..." d < /dev/tty
 }
 
-# --- 【新增獨立模組：選項 4 切換/升級通道配置】 ---
+# --- 【切換/升級通道配置 (強化防呆與精確解析)】 ---
 switch_tunnel_profile() {
     while true; do
         clear
@@ -258,19 +272,24 @@ switch_tunnel_profile() {
         TARGET="${TUNNELS[$((T_CHOICE-1))]}"
         YML_PATH="${CF_DIR}/${TARGET}.yml"
 
-        # 讀取現有配置的核心資訊
-        UUID_CUR=$(grep 'tunnel:' "$YML_PATH" 2>/dev/null | awk '{print $2}')
-        DOM_CUR=$(grep 'hostname:' "$YML_PATH" 2>/dev/null | awk '{print $2}')
-        PORT_CUR=$(grep 'service:' "$YML_PATH" 2>/dev/null | grep -oE '[0-9]+' | head -1)
-        [[ -z "$PORT_CUR" ]] && PORT_CUR="$DEFAULT_PORT"
+        # 精確讀取現有配置的核心資訊
+        UUID_CUR=$(grep -m1 'tunnel:' "$YML_PATH" 2>/dev/null | awk '{print $2}' | tr -d ' "\r')
+        DOM_CUR=$(extract_domain "$YML_PATH")
+        PORT_CUR=$(extract_port "$YML_PATH")
 
-        if [[ -z "$UUID_CUR" || -z "$DOM_CUR" ]]; then
-            echo -e "${RED}錯誤: 無法讀取通道 [${TARGET}] 的 UUID 或網域資訊，檔案可能損壞！${PLAIN}"
+        # 防呆修復：如果原網域名稱讀取出來是 "hostname:" 或空值，主動要求輸入正確網域名稱
+        if [[ -z "$DOM_CUR" || "$DOM_CUR" == "hostname:" ]]; then
+            echo -e "${YELLOW}檢測到該通道配置中的網域名稱異常，請補全正確網域：${PLAIN}"
+            read -rp "請輸入該通道綁定的正確網域 (如 dash.yourdomain.com): " DOM_CUR < /dev/tty
+        fi
+
+        if [[ -z "$UUID_CUR" ]]; then
+            echo -e "${RED}錯誤: 無法讀取通道 [${TARGET}] 的 Tunnel UUID，檔案可能損壞！${PLAIN}"
             read -rp "按回車鍵返回..." d < /dev/tty
             continue
         fi
 
-        echo -e "\n當前選中通道: ${CYAN}${TARGET}${PLAIN} (網域: ${BLUE}${DOM_CUR}${PLAIN}, 端口: ${PORT_CUR})"
+        echo -e "\n當前操作通道: ${CYAN}${TARGET}${PLAIN} (網域: ${BLUE}${DOM_CUR}${PLAIN}, 端口: ${CYAN}${PORT_CUR}${PLAIN})"
         echo -e "-------------------------------------------------"
         echo -e "請選擇欲套用的新最優模板："
         echo -e "  ${YELLOW}1.${PLAIN} 🌐 ${GREEN}切換為【網站業務高並發優化模板】${PLAIN}"
@@ -284,7 +303,7 @@ switch_tunnel_profile() {
         [[ -z "$NEW_TYPE" || "$NEW_TYPE" == "0" ]] && continue
 
         if [[ "$NEW_TYPE" == "1" || "$NEW_TYPE" == "2" || "$NEW_TYPE" == "3" ]]; then
-            echo -e "\n${YELLOW}正在重構 YAML 設定檔並清除舊無效參數...${PLAIN}"
+            echo -e "\n${YELLOW}正在重寫 YAML 設定檔並清除無效參數...${PLAIN}"
             write_tunnel_yaml "$NEW_TYPE" "$UUID_CUR" "$DOM_CUR" "$PORT_CUR" "$YML_PATH"
             
             echo -e "${YELLOW}正在重啟通道服務使新參數生效...${PLAIN}"
@@ -338,14 +357,14 @@ manage_tunnels() {
                echo -e "${RED}警告：這將同步刪除雲端隧道與 DNS 記錄！${PLAIN}"
                read -rp "確定刪除 ${TARGET} 嗎？[y/N]: " confirm < /dev/tty
                if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-                   UUID_DEL=$(grep 'tunnel:' "$YML_PATH" 2>/dev/null | awk '{print $2}')
-                   DOM_DEL=$(grep 'hostname:' "$YML_PATH" 2>/dev/null | awk '{print $2}')
+                   UUID_DEL=$(grep -m1 'tunnel:' "$YML_PATH" 2>/dev/null | awk '{print $2}' | tr -d ' "\r')
+                   DOM_DEL=$(extract_domain "$YML_PATH")
                    
                    systemctl stop ${TARGET} 2>/dev/null
                    systemctl disable ${TARGET} 2>/dev/null
                    
                    if [[ -n "$UUID_DEL" ]]; then
-                       [[ -n "$DOM_DEL" ]] && cloudflared tunnel route dns cleanup "$DOM_DEL" >/dev/null 2>&1
+                       [[ -n "$DOM_DEL" && "$DOM_DEL" != "hostname:" ]] && cloudflared tunnel route dns cleanup "$DOM_DEL" >/dev/null 2>&1
                        cloudflared tunnel delete -f "$UUID_DEL" >/dev/null 2>&1
                    fi
 
@@ -367,14 +386,14 @@ show_status() {
         for t in "${TUNNELS[@]}"; do
             YML_FILE="${CF_DIR}/${t}.yml"
             STATUS=$(systemctl is-active ${t}.service 2>/dev/null)
-            DOMAIN_INFO=$(grep 'hostname:' "$YML_FILE" 2>/dev/null | awk '{print $2}')
-            PORT_INFO=$(grep 'service:' "$YML_FILE" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+            DOMAIN_INFO=$(extract_domain "$YML_FILE")
+            PORT_INFO=$(extract_port "$YML_FILE")
             PROF_TAG=$(detect_profile "$YML_FILE")
             
             if [[ "$STATUS" == "active" ]]; then
                 echo -e "通道 [${GREEN}${t}${PLAIN}] : ${GREEN}運行中${PLAIN} | 網域: ${BLUE}${DOMAIN_INFO}${PLAIN} (端口:${PORT_INFO}) | ${PROF_TAG}"
             else
-                echo -e "通道 [${RED}${t}${PLAIN}] : ${RED}未運行 ($STATUS)${PLAIN}"
+                echo -e "通道 [${RED}${t}${PLAIN}] : ${RED}未運行 ($STATUS)${PLAIN} | 網域: ${BLUE}${DOMAIN_INFO}${PLAIN} (端口:${PORT_INFO})"
             fi
         done
     fi
@@ -420,14 +439,14 @@ nuke_all_tunnels() {
         else
             for t in "${TUNNELS[@]}"; do
                 echo -e "${BLUE}>>> 正在銷毀通道: ${t}${PLAIN}"
-                UUID_DEL=$(grep 'tunnel:' ${CF_DIR}/${t}.yml 2>/dev/null | awk '{print $2}')
-                DOM_DEL=$(grep 'hostname:' ${CF_DIR}/${t}.yml 2>/dev/null | awk '{print $2}')
+                UUID_DEL=$(grep -m1 'tunnel:' ${CF_DIR}/${t}.yml 2>/dev/null | awk '{print $2}' | tr -d ' "\r')
+                DOM_DEL=$(extract_domain "${CF_DIR}/${t}.yml")
                 
                 systemctl stop ${t} 2>/dev/null
                 systemctl disable ${t} 2>/dev/null
                 
                 if [[ -n "$UUID_DEL" ]]; then
-                    [[ -n "$DOM_DEL" ]] && cloudflared tunnel route dns cleanup "$DOM_DEL" >/dev/null 2>&1
+                    [[ -n "$DOM_DEL" && "$DOM_DEL" != "hostname:" ]] && cloudflared tunnel route dns cleanup "$DOM_DEL" >/dev/null 2>&1
                     cloudflared tunnel delete -f "$UUID_DEL" >/dev/null 2>&1
                 fi
                 
@@ -454,13 +473,13 @@ while true; do
     
     echo -e "${BLUE}=================================================${PLAIN}"
     echo -e "  🚀 ${GREEN}Cloudflare Tunnel (cftu) 管理面板${PLAIN}"
-    echo -e "      架構: Incus 容器獨立隧道  |  版本: 2.1.0"
+    echo -e "      架構: Incus 容器獨立隧道  |  版本: 2.1.1"
     echo -e "${BLUE}=================================================${PLAIN}"
     echo -e "${YELLOW} 1.${PLAIN} 初始化環境並安裝 Cloudflared $ICON1"
     echo -e "${YELLOW} 2.${PLAIN} 登入 Cloudflare 帳號 $ICON2"
     echo -e "-------------------------------------------------"
     echo -e "${YELLOW} 3.${PLAIN} ${GREEN}➕ 新建並發佈通道 (預設 52880, 支援場景異化)${PLAIN}"
-    echo -e "${YELLOW} 4.${PLAIN} ${CYAN}🔄 切換/升級通道配置 (網站 ⇋ 代理 舊配置升級)${PLAIN}"
+    echo -e "${YELLOW} 4.${PLAIN} ${CYAN}🔄 切換/升級通道配置 (網站 ⇋ 代理)${PLAIN}"
     echo -e "${YELLOW} 5.${PLAIN} ⚙️  管理現有通道 (日誌 / 重啟 / nano編輯 / 刪除)"
     echo -e "${YELLOW} 6.${PLAIN} 📊 查看通道運行狀態與網域"
     echo -e "-------------------------------------------------"
